@@ -320,7 +320,7 @@ M68kStepResult m68k_step_execute_flow_span(M68kStepContext *c,const M68kStepFlow
 M68kStepResult m68k_step_execute_validated_flow_span(M68kStepContext *c,const M68kStepFlowSpan *span,uint64_t budget)
 {return execute_flow_span(c,span,budget,1);}
 
-static void retire_operation(M68kStepContext *c, const M68kStepEntry *entry,
+static inline void retire_operation(M68kStepContext *c, const M68kStepEntry *entry,
                              M68kStepOperation operation, int tracked)
 {
     const uint32_t pc = c->state.regs.PC;
