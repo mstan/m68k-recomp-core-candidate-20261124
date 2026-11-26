@@ -456,10 +456,21 @@ static void function_finder_run_impl(const GenesisRom *rom, FunctionList *list,
                 int16_t d16  = (int16_t)instr.words[1];
                 uint32_t tgt = instr.addr + 2 + (int32_t)d16;
                 M68KInstr t;
-                if (tgt < rom->rom_size && m68k_decode(rom, tgt, &t) &&
+                /* OS-9 service $2A publishes A0 as a driver IRQ callback.
+                 * Prove the adjacent registration gate, rather than treating
+                 * every LEA of a legal-looking string/table as executable. */
+                bool callback_registration=false;
+                uint32_t gate_pc=instr.addr+instr.byte_length;
+                M68KInstr gate;
+                if(cfg && cfg->trap0_inline_service_word && instr.mnemonic==MN_LEA &&
+                    instr.reg==0 && gate_pc+4u<=rom->rom_size &&
+                    m68k_decode(rom,gate_pc,&gate) && gate.words[0]==0x4e40u &&
+                    gate.byte_length==2 && rom_read16(rom,gate_pc+2)==0x002au)
+                    callback_registration=true;
+                if (!(tgt&1u) && tgt < rom->rom_size && m68k_decode(rom, tgt, &t) &&
                     m68k_validate(&t, &vopts) == M68K_LEGAL &&
-                    (t.mnemonic == MN_BRA || t.mnemonic == MN_JMP) &&
-                    t.has_target &&
+                    (callback_registration ||
+                     ((t.mnemonic == MN_BRA || t.mnemonic == MN_JMP) && t.has_target)) &&
                     !game_config_is_blacklisted(cfg, tgt)) {
                     add_function(list, tgt);
                 }
