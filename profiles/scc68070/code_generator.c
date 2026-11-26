@@ -12,7 +12,6 @@
 #include "function_finder.h"
 #include "annotations.h"
 #include "game_config.h"
-#include "portable_io.h"
 #include "rom_parser.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -1357,6 +1356,42 @@ static bool has_matching_pc_idx_offset_load(const GenesisRom *rom,
     return false;
 }
 
+/* A register-based spelling of the same signed-offset table:
+ *   lea table(pc),An; move.w (d8,An,Dn.w),Dn; jmp (d8,An,Dn.w)
+ * Prove all three adjacent instructions and an identical index/displacement.
+ * This does not infer targets from arbitrary JMP (An,Xn) values. */
+static void seed_an_idx_dispatch_targets(const GenesisRom *rom,
+                                         const M68KInstr *jump,
+                                         AddrSet *worklist)
+{
+    if (!rom || !jump || jump->addr < 8 || jump->word_count != 2 ||
+        (jump->src_ea >> 3) != EA_An_IDX) return;
+    uint16_t ext = jump->words[1];
+    if (ext & 0x8F00u) return; /* Dn.w, unscaled brief extension only. */
+    int areg = jump->src_ea & 7, dreg = (ext >> 12) & 7;
+    M68KInstr lea, load;
+    if (!m68k_decode(rom,jump->addr-8,&lea) || !m68k_decode(rom,jump->addr-4,&load))return;
+    if (lea.byte_length != 4 || lea.mnemonic != MN_LEA ||
+        lea.src_ea != ((EA_PCR << 3) | PCR_PC_DISP) || lea.reg != areg ||
+        load.byte_length != 4 || load.mnemonic != MN_MOVE || load.size != M68K_SIZE_W ||
+        load.src_ea != jump->src_ea || load.dst_ea != ((EA_Dn << 3) | dreg) ||
+        load.words[1] != ext) return;
+    uint32_t base=(uint32_t)(lea.addr+2+(int32_t)(int16_t)lea.words[1]+(int32_t)(int8_t)ext);
+    if(base>=rom->rom_size || (base&1u))return;
+    uint32_t lo=base>0x1000u?base-0x1000u:0;
+    uint32_t hi=base+0x1000u;if(hi<base || hi>rom->rom_size)hi=rom->rom_size;
+    uint32_t targets[128];int count=0;M68KValidatorOptions options={0};
+    for(unsigned i=0;i<128 && base+(uint64_t)i*2+1<rom->rom_size;i++) {
+        uint32_t a=base+i*2;
+        int16_t offset=(int16_t)(((uint16_t)rom->rom_data[a]<<8)|rom->rom_data[a+1]);
+        uint32_t target=(uint32_t)((int32_t)base+offset);M68KInstr probe;
+        if((target&1u) || target<lo || target>=hi || !m68k_decode(rom,target,&probe) ||
+            m68k_validate(&probe,&options)!=M68K_LEGAL)break;
+        targets[count++]=target;
+    }
+    if(count>=2)for(int i=0;i<count;i++)addrset_insert(worklist,targets[i]);
+}
+
 static void seed_pc_idx_dispatch_targets(const GenesisRom *rom,
                                          const M68KInstr *jmp_instr,
                                          AddrSet *worklist,
@@ -1575,6 +1610,7 @@ static void scan_function(const GenesisRom *rom, uint32_t start_addr,
                 if (instr.has_target && instr.target_addr != pc) {
                     addrset_insert(&worklist, instr.target_addr);
                 } else {
+                    seed_an_idx_dispatch_targets(rom,&instr,&worklist);
                     /* Computed dispatch (no static target). If this is a
                      * (d8,PC,Xn) JMP, try to discover Duff's-device or
                      * offset-table targets at the JMP base and seed them
@@ -4435,8 +4471,8 @@ static bool codegen_emit_impl(const GenesisRom *rom, const FunctionList *funcs,
     s_falloff_count = 0;
     s_misaligned_reported_count = 0;
 
-    FILE *f_full     = m68k_fopen(out_full_path,     "w");
-    FILE *f_dispatch = m68k_fopen(out_dispatch_path, "w");
+    FILE *f_full     = fopen(out_full_path,     "w");
+    FILE *f_dispatch = fopen(out_dispatch_path, "w");
 
     if (!f_full) {
         fprintf(stderr, "codegen: cannot open %s\n", out_full_path);
@@ -4504,7 +4540,7 @@ static bool codegen_emit_impl(const GenesisRom *rom, const FunctionList *funcs,
         addrset_free(&iter_boundaries);
 
         /* Add any external targets that aren't already function entries.
-         * Skip addresses from game.toml [functions].blacklist —
+         * Skip blacklisted addresses (game.cfg `blacklist` directive) —
          * useful for data labels the disasm never marks as code that
          * boundary-split would otherwise promote into bogus function
          * entries. */
@@ -4570,7 +4606,7 @@ static bool codegen_emit_impl(const GenesisRom *rom, const FunctionList *funcs,
     bool async_resume = cfg && cfg->async_resume_entries;
 
     if (s_dump_functions_path) {
-        FILE *df = m68k_fopen(s_dump_functions_path, "w");
+        FILE *df = fopen(s_dump_functions_path, "w");
         if (df) {
             fprintf(df, "# Final function-entry set (post-boundary-split). "
                         "%d entries. One hex address per line.\n", all_funcs.count);
@@ -4756,14 +4792,8 @@ static bool codegen_emit_impl(const GenesisRom *rom, const FunctionList *funcs,
                 }
             }
         }
-        if (has_sp_adjust) {
-            /* A generated split-function tail call is one 68K control-flow
-             * path, not a real JSR boundary.  Consume its carried net stack
-             * delta into this function's path-local accounting before any
-             * MOVEM/ADDQ adjustment changes it. */
-            fprintf(f_full, "  int _sp_popped = g_split_sp_popped;\n");
-            fprintf(f_full, "  g_split_sp_popped = 0;\n");
-        }
+        if (has_sp_adjust)
+            fprintf(f_full, "  int _sp_popped = 0;\n");
 
         /* TEMPORARY debug counters for VBla chain tracing */
         if (!s_module_symbol && func_addr == 0x000B64)
@@ -4827,7 +4857,7 @@ static bool codegen_emit_impl(const GenesisRom *rom, const FunctionList *funcs,
                 "  glue_yield_for_vblank();\n"
                 "}\n\n",
                 yield_via_pattern ? "pattern-detected: move/tst.b/bne self/rts"
-                                  : "game.toml: vblank_yield");
+                                  : "game.cfg: vblank_yield");
             addrset_free(&instrs);
             addrset_free(&labels);
             continue;
@@ -5273,7 +5303,7 @@ dispatch_emitted:
         /* Subcategorize FALLBACK_HYBRID entries by what's at `base`:
          *   function_entry:      base IS a registered function entry
          *   bra_w_trampoline:    opcode at base is 0x6000 (bra.w) — runtime
-         *                        miss becomes a [functions].extra lead
+         *                        miss seeds extra_func, then it works
          *   offset_table:        base is the start of a `dc.w (target - base)`
          *                        table — at least 3 of the first 4 entries
          *                        decode to a registered function entry. This
@@ -5363,7 +5393,7 @@ dispatch_emitted:
             }
         }
 
-        FILE *fa = m68k_fopen(audit_path, "w");
+        FILE *fa = fopen(audit_path, "w");
         if (fa) {
             fprintf(fa, "# JMP-table dispatch audit\n");
             fprintf(fa, "# total sites: %d\n", s_jmp_audit_count);
