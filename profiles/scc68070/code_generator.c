@@ -12,7 +12,6 @@
 #include "function_finder.h"
 #include "annotations.h"
 #include "game_config.h"
-#include "portable_io.h"
 #include "rom_parser.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -4435,8 +4434,8 @@ static bool codegen_emit_impl(const GenesisRom *rom, const FunctionList *funcs,
     s_falloff_count = 0;
     s_misaligned_reported_count = 0;
 
-    FILE *f_full     = m68k_fopen(out_full_path,     "w");
-    FILE *f_dispatch = m68k_fopen(out_dispatch_path, "w");
+    FILE *f_full     = fopen(out_full_path,     "w");
+    FILE *f_dispatch = fopen(out_dispatch_path, "w");
 
     if (!f_full) {
         fprintf(stderr, "codegen: cannot open %s\n", out_full_path);
@@ -4504,7 +4503,7 @@ static bool codegen_emit_impl(const GenesisRom *rom, const FunctionList *funcs,
         addrset_free(&iter_boundaries);
 
         /* Add any external targets that aren't already function entries.
-         * Skip addresses from game.toml [functions].blacklist —
+         * Skip blacklisted addresses (game.cfg `blacklist` directive) —
          * useful for data labels the disasm never marks as code that
          * boundary-split would otherwise promote into bogus function
          * entries. */
@@ -4570,7 +4569,7 @@ static bool codegen_emit_impl(const GenesisRom *rom, const FunctionList *funcs,
     bool async_resume = cfg && cfg->async_resume_entries;
 
     if (s_dump_functions_path) {
-        FILE *df = m68k_fopen(s_dump_functions_path, "w");
+        FILE *df = fopen(s_dump_functions_path, "w");
         if (df) {
             fprintf(df, "# Final function-entry set (post-boundary-split). "
                         "%d entries. One hex address per line.\n", all_funcs.count);
@@ -4756,14 +4755,8 @@ static bool codegen_emit_impl(const GenesisRom *rom, const FunctionList *funcs,
                 }
             }
         }
-        if (has_sp_adjust) {
-            /* A generated split-function tail call is one 68K control-flow
-             * path, not a real JSR boundary.  Consume its carried net stack
-             * delta into this function's path-local accounting before any
-             * MOVEM/ADDQ adjustment changes it. */
-            fprintf(f_full, "  int _sp_popped = g_split_sp_popped;\n");
-            fprintf(f_full, "  g_split_sp_popped = 0;\n");
-        }
+        if (has_sp_adjust)
+            fprintf(f_full, "  int _sp_popped = 0;\n");
 
         /* TEMPORARY debug counters for VBla chain tracing */
         if (!s_module_symbol && func_addr == 0x000B64)
@@ -4827,7 +4820,7 @@ static bool codegen_emit_impl(const GenesisRom *rom, const FunctionList *funcs,
                 "  glue_yield_for_vblank();\n"
                 "}\n\n",
                 yield_via_pattern ? "pattern-detected: move/tst.b/bne self/rts"
-                                  : "game.toml: vblank_yield");
+                                  : "game.cfg: vblank_yield");
             addrset_free(&instrs);
             addrset_free(&labels);
             continue;
@@ -5273,7 +5266,7 @@ dispatch_emitted:
         /* Subcategorize FALLBACK_HYBRID entries by what's at `base`:
          *   function_entry:      base IS a registered function entry
          *   bra_w_trampoline:    opcode at base is 0x6000 (bra.w) — runtime
-         *                        miss becomes a [functions].extra lead
+         *                        miss seeds extra_func, then it works
          *   offset_table:        base is the start of a `dc.w (target - base)`
          *                        table — at least 3 of the first 4 entries
          *                        decode to a registered function entry. This
@@ -5363,7 +5356,7 @@ dispatch_emitted:
             }
         }
 
-        FILE *fa = m68k_fopen(audit_path, "w");
+        FILE *fa = fopen(audit_path, "w");
         if (fa) {
             fprintf(fa, "# JMP-table dispatch audit\n");
             fprintf(fa, "# total sites: %d\n", s_jmp_audit_count);
