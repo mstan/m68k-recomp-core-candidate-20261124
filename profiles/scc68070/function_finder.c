@@ -467,9 +467,22 @@ static void function_finder_run_impl(const GenesisRom *rom, FunctionList *list,
                     m68k_decode(rom,gate_pc,&gate) && gate.words[0]==0x4e40u &&
                     gate.byte_length==2 && rom_read16(rom,gate_pc+2)==0x002au)
                     callback_registration=true;
+                /* OS-9 library calls push a PC-relative return, then the
+                 * library code vector, load its paired A3 data vector and
+                 * RTS into the callee. The return after that RTS is code even
+                 * when it starts with an ordinary stack-restoring MOVEA. */
+                bool library_return=false;
+                if(cfg && cfg->trap0_inline_service_word && instr.mnemonic==MN_PEA &&
+                    tgt==gate_pc+10u && gate_pc+10u<=rom->rom_size &&
+                    rom_read16(rom,gate_pc)==0x2f2bu &&
+                    rom_read16(rom,gate_pc+4u)==0x266bu &&
+                    (int32_t)(int16_t)rom_read16(rom,gate_pc+6u)==
+                        (int32_t)(int16_t)rom_read16(rom,gate_pc+2u)+0x400 &&
+                    rom_read16(rom,gate_pc+8u)==0x4e75u)
+                    library_return=true;
                 if (!(tgt&1u) && tgt < rom->rom_size && m68k_decode(rom, tgt, &t) &&
                     m68k_validate(&t, &vopts) == M68K_LEGAL &&
-                    (callback_registration ||
+                    (callback_registration || library_return ||
                      ((t.mnemonic == MN_BRA || t.mnemonic == MN_JMP) && t.has_target)) &&
                     !game_config_is_blacklisted(cfg, tgt)) {
                     add_function(list, tgt);
